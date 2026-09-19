@@ -45,7 +45,12 @@
 
   <section id="app" class="app hidden">
 
-    <label for="input" class="field-label">Фраза по-русски</label>
+    <div class="direction-toggle" role="group" aria-label="Направление перевода">
+      <button type="button" class="dir-btn active" id="dir-ru-pr" data-dir="ru-pr">Русский → Прусский</button>
+      <button type="button" class="dir-btn" id="dir-pr-ru" data-dir="pr-ru">Прусский → Русский</button>
+    </div>
+
+    <label for="input" class="field-label" id="input-label">Фраза по-русски</label>
     <textarea id="input" rows="2" placeholder="Например: Брат идёт в лес" autocomplete="off"></textarea>
 
     <div class="controls">
@@ -56,7 +61,7 @@
 
     <section id="result-wrap" class="result-wrap hidden">
       <div class="result-card">
-        <p class="result-label">Прусский (черновой перевод)</p>
+        <p class="result-label" id="result-label">Прусский (черновой перевод)</p>
         <p id="result-text" class="result-text"></p>
       </div>
 

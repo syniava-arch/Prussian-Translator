@@ -144,6 +144,35 @@ a{ color: var(--amber-bright); }
   margin-bottom: 6px;
 }
 
+.direction-toggle{
+  display: inline-flex;
+  border: 1px solid var(--ink-line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+.dir-btn{
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--parchment-dim);
+  background: var(--ink-panel);
+  border: none;
+  padding: 8px 14px;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.dir-btn + .dir-btn{ border-left: 1px solid var(--ink-line); }
+
+.dir-btn.active{
+  background: var(--amber-dim);
+  color: var(--parchment);
+}
+
+.dir-btn:hover:not(.active){ color: var(--parchment); }
+
 textarea{
   width: 100%;
   resize: vertical;

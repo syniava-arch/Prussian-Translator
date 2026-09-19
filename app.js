@@ -13,6 +13,39 @@ const input = document.getElementById("input");
 const resultWrap = document.getElementById("result-wrap");
 const resultText = document.getElementById("result-text");
 const breakdownBody = document.getElementById("breakdown-body");
+const dirRuPrBtn = document.getElementById("dir-ru-pr");
+const dirPrRuBtn = document.getElementById("dir-pr-ru");
+const inputLabel = document.getElementById("input-label");
+const resultLabel = document.getElementById("result-label");
+
+let direction = "ru-pr"; // "ru-pr" | "pr-ru"
+
+const DIRECTION_UI = {
+  "ru-pr": {
+    inputLabel: "Фраза по-русски",
+    placeholder: "Например: Брат идёт в лес",
+    resultLabel: "Прусский (черновой перевод)",
+  },
+  "pr-ru": {
+    inputLabel: "Фраза по-прусски",
+    placeholder: "Например: kaīls, brāti",
+    resultLabel: "Русский (черновой перевод)",
+  },
+};
+
+function setDirection(dir) {
+  direction = dir;
+  dirRuPrBtn.classList.toggle("active", dir === "ru-pr");
+  dirPrRuBtn.classList.toggle("active", dir === "pr-ru");
+  const ui = DIRECTION_UI[dir];
+  inputLabel.textContent = ui.inputLabel;
+  input.placeholder = ui.placeholder;
+  resultLabel.textContent = ui.resultLabel;
+  resultWrap.classList.add("hidden");
+}
+
+dirRuPrBtn.addEventListener("click", () => setDirection("ru-pr"));
+dirPrRuBtn.addEventListener("click", () => setDirection("pr-ru"));
 
 function setStatus(msg) {
   statusText.textContent = msg;
@@ -58,7 +91,11 @@ async function boot() {
     readyNote.textContent = `Слов: ${stats.words} · с парадигмами: ${stats.overrides} · предлогов: ${stats.prepositions}`;
 
     const translateSentenceJson = pyodide.globals.get("translate_sentence_json");
-    window.__translate = (text) => JSON.parse(translateSentenceJson(text));
+    const translatePrSentenceJson = pyodide.globals.get("translate_pr_sentence_json");
+    window.__translate = {
+      "ru-pr": (text) => JSON.parse(translateSentenceJson(text)),
+      "pr-ru": (text) => JSON.parse(translatePrSentenceJson(text)),
+    };
 
     loadingPanel.classList.add("hidden");
     appPanel.classList.remove("hidden");
@@ -92,7 +129,7 @@ function renderResult(data) {
 function doTranslate() {
   const text = input.value.trim();
   if (!text || !window.__translate) return;
-  const data = window.__translate(text);
+  const data = window.__translate[direction](text);
   renderResult(data);
 }
 
