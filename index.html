@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Переводчик · Prūsiska bilā (черновик)</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>◈</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,500;7..72,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">◈</span>
+      <div class="brand-text">
+        <h1>Переводчик · Prūsiska bilā</h1>
+        <p>Черновой пословный переводчик на основе словаря</p>
+      </div>
+    </div>
+    <span class="badge">эксперимент</span>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="notice">
+    <p>
+      Это черновой пословный переводчик для долгой обкатки, а не готовый продукт.
+      Он не связан с основным сайтом словаря и никак на него не влияет.
+      Перевод строится по правилам (морфология + словарь), без нейросети,
+      поэтому в сложных фразах — особенно с падежами без предлога, порядком
+      слов и согласованием — он будет ошибаться. Подробности и известные
+      ограничения — в <a href="README.md">README</a>.
+    </p>
+  </section>
+
+  <section id="loading" class="status-panel">
+    <div class="spinner" aria-hidden="true"></div>
+    <p id="status-text">Загружаю морфологический анализатор и словарь… обычно 10–20 секунд при первом заходе.</p>
+  </section>
+
+  <section id="app" class="app hidden">
+
+    <label for="input" class="field-label">Фраза по-русски</label>
+    <textarea id="input" rows="2" placeholder="Например: Брат идёт в лес" autocomplete="off"></textarea>
+
+    <div class="controls">
+      <button id="translate-btn" type="button">Перевести</button>
+      <span class="ready-note">Ctrl/⌘+Enter — тоже перевести</span>
+    </div>
+    <p id="ready-note" class="ready-note stats-note"></p>
+
+    <section id="result-wrap" class="result-wrap hidden">
+      <div class="result-card">
+        <p class="result-label">Прусский (черновой перевод)</p>
+        <p id="result-text" class="result-text"></p>
+      </div>
+
+      <details id="breakdown-details">
+        <summary>Разбор по словам</summary>
+        <table id="breakdown-table">
+          <thead>
+            <tr><th>рус.</th><th>прус.</th><th>примечание</th></tr>
+          </thead>
+          <tbody id="breakdown-body"></tbody>
+        </table>
+      </details>
+    </section>
+
+  </section>
+
+  <section id="error" class="status-panel error hidden">
+    <p id="error-text"></p>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <p>Данные словаря: копия <code>data/dictionary.json</code> и <code>data/overrides.json</code> из основного репозитория. Морфология русского — pymorphy3, выполняется в браузере через Pyodide.</p>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.3/full/pyodide.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
