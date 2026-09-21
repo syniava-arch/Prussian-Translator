@@ -24,8 +24,8 @@ const resultLabel = document.getElementById("result-label");
 // соответствующая кнопка просто не показывается, скопировать отчёт
 // можно всегда, это не требует настройки.
 const FEEDBACK_CONFIG = {
-  githubRepo: "", // например: "stanislavas/prussian-translator"
-  email: "",      // например: "you@example.com"
+  githubRepo: "syniava-arch/Prussian-Translator", // например: "stanislavas/prussian-translator"
+  email: "syniava@outlook.com",      // например: "you@example.com"
 };
 
 let lastResult = null; // { direction, inputText, data } - для контекстного отчёта
