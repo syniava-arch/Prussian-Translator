@@ -74,6 +74,20 @@
           <tbody id="breakdown-body"></tbody>
         </table>
       </details>
+
+      <details id="feedback-details">
+        <summary>Сообщить об ошибке / оставить комментарий к этому переводу</summary>
+        <div class="feedback-body">
+          <label for="feedback-comment" class="field-label">Комментарий (необязательно)</label>
+          <textarea id="feedback-comment" rows="2" placeholder="Например: должен быть другой падеж / не то слово / и т.п."></textarea>
+          <div class="feedback-actions">
+            <button type="button" id="feedback-copy" class="feedback-btn">Скопировать отчёт</button>
+            <a id="feedback-github" class="feedback-btn feedback-link hidden" target="_blank" rel="noopener">Открыть issue на GitHub</a>
+            <a id="feedback-email" class="feedback-btn feedback-link hidden" target="_blank" rel="noopener">Написать на почту</a>
+          </div>
+          <p id="feedback-copied-note" class="ready-note hidden">Отчёт скопирован — вставьте его куда удобно.</p>
+        </div>
+      </details>
     </section>
 
   </section>
@@ -86,6 +100,12 @@
 
 <footer class="foot">
   <p>Данные словаря: копия <code>data/dictionary.json</code> и <code>data/overrides.json</code> из основного репозитория. Морфология русского — pymorphy3, выполняется в браузере через Pyodide.</p>
+  <p class="feedback-general-row">
+    <button type="button" id="feedback-general-copy" class="feedback-btn feedback-btn-ghost">Оставить общий отзыв / пожелание</button>
+    <a id="feedback-general-github" class="feedback-btn feedback-btn-ghost feedback-link hidden" target="_blank" rel="noopener">Открыть issue на GitHub</a>
+    <a id="feedback-general-email" class="feedback-btn feedback-btn-ghost feedback-link hidden" target="_blank" rel="noopener">Написать на почту</a>
+  </p>
+  <p id="feedback-general-copied-note" class="ready-note hidden">Шаблон отзыва скопирован — вставьте его куда удобно.</p>
 </footer>
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.27.3/full/pyodide.js"></script>

@@ -18,6 +18,18 @@ const dirPrRuBtn = document.getElementById("dir-pr-ru");
 const inputLabel = document.getElementById("input-label");
 const resultLabel = document.getElementById("result-label");
 
+// --- Обратная связь -------------------------------------------------------
+// Заполните перед или сразу после деплоя (репозиторий появится только
+// после того, как вы его создадите на GitHub). Если оставить пустым —
+// соответствующая кнопка просто не показывается, скопировать отчёт
+// можно всегда, это не требует настройки.
+const FEEDBACK_CONFIG = {
+  githubRepo: "", // например: "stanislavas/prussian-translator"
+  email: "",      // например: "you@example.com"
+};
+
+let lastResult = null; // { direction, inputText, data } - для контекстного отчёта
+
 let direction = "ru-pr"; // "ru-pr" | "pr-ru"
 
 const DIRECTION_UI = {
@@ -131,6 +143,133 @@ function doTranslate() {
   if (!text || !window.__translate) return;
   const data = window.__translate[direction](text);
   renderResult(data);
+  lastResult = { direction, inputText: text, data };
+  updateFeedbackLinks();
+}
+
+// --- Обратная связь --------------------------------------------------------
+
+const DIRECTION_LABEL = { "ru-pr": "русский → прусский", "pr-ru": "прусский → русский" };
+
+function buildReportText(comment) {
+  const lines = ["Отзыв о переводчике Prūsiska bilā", "Страница: " + location.href, ""];
+
+  if (lastResult) {
+    lines.push("Направление: " + (DIRECTION_LABEL[lastResult.direction] || lastResult.direction));
+    lines.push("Ввод: " + lastResult.inputText);
+    lines.push("Перевод: " + (lastResult.data.translation || "—"));
+    if (lastResult.data.words && lastResult.data.words.length) {
+      lines.push("Разбор:");
+      for (const w of lastResult.data.words) {
+        lines.push(`  ${w.src} -> ${w.out}${w.note ? " (" + w.note + ")" : ""}`);
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("Комментарий: " + (comment && comment.trim() ? comment.trim() : "(не указан)"));
+  return lines.join("\n");
+}
+
+async function copyReport(text, noteEl) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    // запасной путь для браузеров/контекстов без Clipboard API
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch (e2) { /* сдаёмся молча */ }
+    document.body.removeChild(ta);
+  }
+  if (noteEl) {
+    noteEl.classList.remove("hidden");
+    setTimeout(() => noteEl.classList.add("hidden"), 4000);
+  }
+}
+
+function githubIssueUrl(title, body) {
+  if (!FEEDBACK_CONFIG.githubRepo) return null;
+  const qs = `title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+  return `https://github.com/${FEEDBACK_CONFIG.githubRepo}/issues/new?${qs}`;
+}
+
+function mailtoUrl(subject, body) {
+  if (!FEEDBACK_CONFIG.email) return null;
+  // mailto (RFC 6068) требует процентное кодирование пробелов как %20, а не
+  // "+", как это делает URLSearchParams - иначе часть почтовых клиентов
+  // покажет плюсы прямо в тексте письма.
+  const qs = `subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  return `mailto:${FEEDBACK_CONFIG.email}?${qs}`;
+}
+
+function wireFeedbackLinkPair(githubEl, emailEl, buildTitle, buildBody) {
+  const ghUrl = githubIssueUrl(buildTitle(), buildBody());
+  if (ghUrl) {
+    githubEl.href = ghUrl;
+    githubEl.classList.remove("hidden");
+  } else {
+    githubEl.classList.add("hidden");
+  }
+  const mUrl = mailtoUrl(buildTitle(), buildBody());
+  if (mUrl) {
+    emailEl.href = mUrl;
+    emailEl.classList.remove("hidden");
+  } else {
+    emailEl.classList.add("hidden");
+  }
+}
+
+// -- контекстный блок (привязан к последнему переводу) --
+const feedbackComment = document.getElementById("feedback-comment");
+const feedbackCopyBtn = document.getElementById("feedback-copy");
+const feedbackGithubLink = document.getElementById("feedback-github");
+const feedbackEmailLink = document.getElementById("feedback-email");
+const feedbackCopiedNote = document.getElementById("feedback-copied-note");
+
+function updateFeedbackLinks() {
+  const comment = feedbackComment ? feedbackComment.value : "";
+  wireFeedbackLinkPair(
+    feedbackGithubLink,
+    feedbackEmailLink,
+    () => "Замечание к переводу: " + (lastResult ? lastResult.inputText : ""),
+    () => buildReportText(comment)
+  );
+}
+
+if (feedbackCopyBtn) {
+  feedbackCopyBtn.addEventListener("click", () => {
+    copyReport(buildReportText(feedbackComment ? feedbackComment.value : ""), feedbackCopiedNote);
+  });
+}
+if (feedbackComment) {
+  feedbackComment.addEventListener("input", updateFeedbackLinks);
+}
+
+// -- общая форма в подвале (не привязана к конкретному переводу) --
+const feedbackGeneralCopyBtn = document.getElementById("feedback-general-copy");
+const feedbackGeneralGithubLink = document.getElementById("feedback-general-github");
+const feedbackGeneralEmailLink = document.getElementById("feedback-general-email");
+const feedbackGeneralCopiedNote = document.getElementById("feedback-general-copied-note");
+
+function generalReportText() {
+  return "Отзыв о переводчике Prūsiska bilā\nСтраница: " + location.href + "\n\nПожелание/замечание: ";
+}
+
+wireFeedbackLinkPair(
+  feedbackGeneralGithubLink,
+  feedbackGeneralEmailLink,
+  () => "Отзыв о переводчике",
+  generalReportText
+);
+
+if (feedbackGeneralCopyBtn) {
+  feedbackGeneralCopyBtn.addEventListener("click", () => {
+    copyReport(generalReportText(), feedbackGeneralCopiedNote);
+  });
 }
 
 translateBtn.addEventListener("click", doTranslate);
