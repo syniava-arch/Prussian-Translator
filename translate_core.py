@@ -59,6 +59,7 @@ morph = pymorphy3.MorphAnalyzer()
 _ru_index = {}
 _override_by_id = {}
 _preposition_index = {}
+_phrasebook = {}
 _ru_max_phrase_words = 1
 _pr_index = {}          # точная форма (в нижнем регистре) -> [(entry, label), ...]
 _pr_index_folded = {}   # то же, но без макронов - запасной вариант поиска
@@ -86,6 +87,21 @@ WORD_TOKEN_RE = re.compile(r"^[\wа-яёА-ЯЁ-]+$", re.UNICODE)
 PUNCT_TOKEN_RE = re.compile(r"^[^\wа-яёА-ЯЁ]+$", re.UNICODE)
 PR_WORD_TOKEN_RE = re.compile(r"^[\wāēīōūâêîôûàèìòùáéíóúŠšČčŽž-]+$", re.UNICODE)
 PR_PUNCT_TOKEN_RE = re.compile(r"^[^\wāēīōūâêîôûàèìòùáéíóúŠšČčŽž]+$", re.UNICODE)
+
+# Для обратного PR -> RU перевода один и тот же прусский падеж после
+# предлога не всегда соответствует русскому падежу. Например, ēn + dat
+# по-русски обычно "в/на ком? чём?" -> предложный падеж.
+PR_PREP_RU_CASE = {
+    "ēn": {"dat": "loct", "akk": "accs", None: "loct"},
+    "en": {"dat": "loct", "akk": "accs", None: "loct"},
+    "prīki": {"akk": "gent", None: "gent"},
+    "prīkin": {"akk": "gent", None: "gent"},
+    "sēn": {"akk": "ablt", None: "ablt"},
+    "sen": {"akk": "ablt", None: "ablt"},
+    "ezze": {"dat": "gent", None: "gent"},
+    "iz": {"akk": "gent", None: "gent"},
+    "prēi": {"akk": "datv", None: "datv"},
+}
 
 
 def classify_pos(entry, override):
@@ -187,6 +203,45 @@ def _iter_pr_form_keys(form):
                 yield key
 
 
+def _load_phrasebook(phrasebook_json_str):
+    """Загружает небольшую таблицу устойчивых выражений/алиасов.
+
+    Формат намеренно простой: список объектов с полем ru (строка или список
+    строк), pr/out и необязательным note. Phrasebook имеет приоритет над
+    автоматическим пословным разбором, но не заменяет словарь.
+    """
+    if not phrasebook_json_str:
+        return {}, 1
+    try:
+        data = json.loads(phrasebook_json_str)
+    except Exception:
+        return {}, 1
+    if isinstance(data, dict):
+        data = data.get("phrases", [])
+    if not isinstance(data, list):
+        return {}, 1
+
+    phrases = {}
+    max_words = 1
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        ru_values = item.get("ru") or item.get("source") or item.get("from")
+        out = item.get("pr") or item.get("out") or item.get("to")
+        if not ru_values or not out:
+            continue
+        if isinstance(ru_values, str):
+            ru_values = [ru_values]
+        note = item.get("note") or "phrasebook"
+        for ru in ru_values:
+            key = _clean_ru_chunk(str(ru))
+            if not key:
+                continue
+            phrases[key] = {"out": str(out), "note": note}
+            max_words = max(max_words, len(key.split()))
+    return phrases, max_words
+
+
 def _collect_forms(node, label=""):
     """Рекурсивно собирает все прусские словоформы из paradigm/conjugation
     вместе с грамматической меткой (путь по ключам, плюс подпись лица для
@@ -211,11 +266,12 @@ def _collect_forms(node, label=""):
     return out
 
 
-def load_data(dictionary_json_str, overrides_json_str):
-    global _ru_index, _override_by_id, _preposition_index, _ru_max_phrase_words
+def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None):
+    global _ru_index, _override_by_id, _preposition_index, _phrasebook, _ru_max_phrase_words
     global _pr_index, _pr_index_folded, _pr_max_phrase_words
     dictionary = json.loads(dictionary_json_str)
     overrides = json.loads(overrides_json_str)
+    _phrasebook, phrasebook_max_words = _load_phrasebook(phrasebook_json_str)
 
     _override_by_id = {o["id"]: o for o in overrides if "id" in o}
 
@@ -239,7 +295,7 @@ def load_data(dictionary_json_str, overrides_json_str):
         ru_index["они"] = [by_headword["tāns"]]
 
     _ru_index = ru_index
-    _ru_max_phrase_words = ru_max_phrase_words
+    _ru_max_phrase_words = max(ru_max_phrase_words, phrasebook_max_words)
 
     preposition_index = {}
     for e in dictionary:
@@ -293,7 +349,7 @@ def load_data(dictionary_json_str, overrides_json_str):
         pr_index_folded.setdefault(fold_diacritics(form_lower), []).extend(matches)
     _pr_index_folded = pr_index_folded
 
-    return {"words": len(dictionary), "overrides": len(_override_by_id), "prepositions": len(preposition_index)}
+    return {"words": len(dictionary), "overrides": len(_override_by_id), "prepositions": len(preposition_index), "phrases": len(_phrasebook)}
 
 
 def pick_noun_form(override, gender_guess, number, case):
@@ -558,6 +614,17 @@ def _translate_word_info(token, forced_case=None, agreement=None, preposition_ch
     if not clean:
         return {"out": token, "note": None, "gov_case": None, "pos": None, "case_used": None, "consumes_case": False}
 
+    phrase_override = _phrasebook.get(clean)
+    if phrase_override:
+        return {
+            "out": phrase_override["out"],
+            "note": phrase_override["note"],
+            "gov_case": None,
+            "pos": None,
+            "case_used": None,
+            "consumes_case": False,
+        }
+
     if preposition_choice or _preposition_key(clean):
         choice = preposition_choice or _select_preposition(clean)
         if choice:
@@ -660,6 +727,14 @@ def _match_ru_phrase(tokens, start_idx):
         j += 1
     for size in range(len(parts), 1, -1):
         phrase = " ".join(parts[:size])
+        phrase_override = _phrasebook.get(phrase)
+        if phrase_override:
+            return {
+                "end": positions[size - 1] + 1,
+                "src": " ".join(tokens[start_idx:positions[size - 1] + 1]),
+                "out": phrase_override["out"],
+                "note": phrase_override["note"],
+            }
         candidates = _ru_index.get(phrase)
         if candidates:
             entry, _ = choose_candidate(candidates, None)
@@ -694,17 +769,17 @@ def translate_sentence_json(sentence):
             continue
 
         clean = _clean_ru_token(tok)
+        phrase = _match_ru_phrase(tokens, i)
+        if phrase:
+            out_words.append(phrase["out"])
+            debug.append({"src": phrase["src"], "out": phrase["out"], "note": phrase["note"]})
+            pending_case = None
+            i = phrase["end"]
+            continue
+
         prep_choice = None
         if clean and _preposition_key(clean):
             prep_choice = _select_preposition(clean, _next_word_parse(tokens, i))
-        else:
-            phrase = _match_ru_phrase(tokens, i)
-            if phrase:
-                out_words.append(phrase["out"])
-                debug.append({"src": phrase["src"], "out": phrase["out"], "note": phrase["note"]})
-                pending_case = None
-                i = phrase["end"]
-                continue
 
         parse = _parse_ru(clean) if clean and not prep_choice else None
         direct_case = None if pending_case or not direct_object_pending or not parse else _direct_object_case_for_parse(parse)
@@ -757,6 +832,38 @@ def translate_sentence_json(sentence):
 # PR -> RU
 # ---------------------------------------------------------------------------
 
+def _label_grammar(label):
+    """Из метки формы (masc.sg.akk, indicative.present as (я), ...)
+    достаёт признаки, пригодные для синтеза русской формы."""
+    parts = label.split(".") if label else []
+    info = {"case": None, "ru_case": None, "number": None, "gender": None, "person": None, "tense": None}
+    for p in parts:
+        base = p.split(" ")[0]
+        if base in CASE_MAP_INV:
+            info["case"] = base
+            info["ru_case"] = CASE_MAP_INV[base]
+        if base in NUMBER_MAP_INV:
+            info["number"] = NUMBER_MAP_INV[base]
+        if base in GENDER_MAP_INV:
+            info["gender"] = GENDER_MAP_INV[base]
+        if base in ("present", "past", "future"):
+            info["tense"] = {"present": "pres", "past": "past", "future": "futr"}[base]
+    last = parts[-1] if parts else ""
+    if "(я)" in last:
+        info.update({"person": "1per", "number": "sing"})
+    elif "(ты)" in last:
+        info.update({"person": "2per", "number": "sing"})
+    elif "(мы)" in last:
+        info.update({"person": "1per", "number": "plur"})
+    elif "(вы)" in last:
+        info.update({"person": "2per", "number": "plur"})
+    elif "(он/она/оно)" in last:
+        info.update({"person": "3per", "number": "sing"})
+    elif "(они)" in last:
+        info.update({"person": "3per", "number": "plur"})
+    return info
+
+
 def _label_to_ru_grammemes(label):
     parts = label.split(".")
     grammemes = set()
@@ -789,20 +896,112 @@ def _label_to_ru_grammemes(label):
     return grammemes
 
 
-def _ru_gloss_for_entry(entry, label):
+def _ru_pronoun_form(entry, label):
+    """Личные местоимения нельзя надёжно получать из первого русского gloss.
+    Например, статья jūsu хранит gloss "вы", но её sg.akk форма ten должна
+    переводиться как "тебя". Поэтому задаём основные формы явно."""
+    word = (entry.get("w") or "").lower()
+    info = _label_grammar(label)
+    number = info.get("number")
+    case = info.get("ru_case") or "nomn"
+
+    if word in {"as", "mes"}:
+        if label == "" and word == "mes":
+            number = "plur"
+        if number == "plur":
+            return {"nomn": "мы", "gent": "нас", "datv": "нам", "accs": "нас", "ablt": "нами", "loct": "нас"}.get(case, "мы")
+        return {"nomn": "я", "gent": "меня", "datv": "мне", "accs": "меня", "ablt": "мной", "loct": "мне"}.get(case, "я")
+
+    if word in {"tū", "jūs"}:
+        if label == "" and word == "jūs":
+            number = "plur"
+        if number == "plur":
+            return {"nomn": "вы", "gent": "вас", "datv": "вам", "accs": "вас", "ablt": "вами", "loct": "вас"}.get(case, "вы")
+        return {"nomn": "ты", "gent": "тебя", "datv": "тебе", "accs": "тебя", "ablt": "тобой", "loct": "тебе"}.get(case, "ты")
+
+    if word in {"tāns", "tenā", "tennan", "dis", "di"}:
+        gender = info.get("gender") or "masc"
+        if number == "plur":
+            return {"nomn": "они", "gent": "их", "datv": "им", "accs": "их", "ablt": "ими", "loct": "них"}.get(case, "они")
+        if gender == "femn":
+            return {"nomn": "она", "gent": "её", "datv": "ей", "accs": "её", "ablt": "ей", "loct": "ней"}.get(case, "она")
+        if gender == "neut":
+            return {"nomn": "оно", "gent": "его", "datv": "ему", "accs": "его", "ablt": "им", "loct": "нём"}.get(case, "оно")
+        return {"nomn": "он", "gent": "его", "datv": "ему", "accs": "его", "ablt": "им", "loct": "нём"}.get(case, "он")
+    return None
+
+
+def _ru_verb_form(gloss, label, subject_gender=None):
+    info = _label_grammar(label)
+    tense = info.get("tense")
+    number = info.get("number") or "sing"
+    person = info.get("person") or "3per"
+    grammemes = set()
+
+    if tense == "past":
+        grammemes.add("past")
+        grammemes.add(number)
+        # В русском прошедшем времени нет лица; для ед. числа нужен род.
+        if number == "sing":
+            grammemes.add(subject_gender or "masc")
+    elif tense in ("pres", "futr"):
+        grammemes.update({tense, number, person})
+    else:
+        return None
+
+    p = morph.parse(gloss)[0]
+    try:
+        inflected = p.inflect(grammemes)
+    except Exception:
+        inflected = None
+    return inflected.word if inflected else None
+
+
+def _ru_gloss_for_entry(entry, label, forced_case=None, agreement=None, subject_gender=None):
     """Возвращает (русское_слово, заметку) для статьи словаря, по
     возможности согласовав русское слово с распознанной грамматической
-    формой (падеж/число или лицо/время) через pymorphy3.inflect()."""
+    формой. В отличие от ранней версии, не переносит прусский род на русские
+    существительные: buttan neut, но русский "дом" masc."""
     ru_field = entry.get("ru", "")
     first_chunk = _split_ru_field(ru_field)[0] if ru_field else ""
     gloss = _clean_ru_chunk(first_chunk) or ru_field.strip() or "?"
 
     note_form = label.replace(".", "/") if label else "словарная форма"
+    override = _override_by_id.get(entry.get("i"))
+    pos = classify_pos(entry, override)
+
+    pronoun = _ru_pronoun_form(entry, label)
+    if pronoun:
+        return pronoun, note_form
 
     if not gloss or " " in gloss.strip():
         return gloss or "?", note_form  # фразу не склоняем
 
-    grammemes = _label_to_ru_grammemes(label) if label else set()
+    # pymorphy3 даёт предложный "годе", но в датах по-русски нужна форма
+    # "в 1273 году". Это частый случай для mettan.
+    if gloss == "год" and forced_case == "loct":
+        return "году", note_form
+
+    if pos == "VERB":
+        verb = _ru_verb_form(gloss, label, subject_gender=subject_gender)
+        if verb:
+            return verb, note_form
+
+    info = _label_grammar(label)
+    ru_case = forced_case or (agreement or {}).get("case") or info.get("ru_case")
+    number = (agreement or {}).get("number") or info.get("number")
+    gender = (agreement or {}).get("gender") or info.get("gender")
+
+    grammemes = set()
+    if ru_case:
+        grammemes.add(ru_case)
+    if number:
+        grammemes.add(number)
+    # Русским существительным род задаёт сама лемма; чужой прусский род часто
+    # ломает инфлексию. Для прилагательных/причастий род нужен.
+    if pos in ("ADJF", "PRTF") and gender:
+        grammemes.add(gender)
+
     if grammemes:
         p = morph.parse(gloss)[0]
         try:
@@ -823,24 +1022,143 @@ def _entry_has_ru_gloss(entry):
     return bool(_clean_ru_chunk(first_chunk) or ru_field.strip())
 
 
-def _lookup_pr(clean_key):
-    matches = _pr_index.get(clean_key) or _pr_index_folded.get(fold_diacritics(clean_key))
+def _lookup_pr_matches(clean_key):
+    return _pr_index.get(clean_key) or _pr_index_folded.get(fold_diacritics(clean_key)) or []
+
+
+def _label_matches_agreement(label, agreement):
+    if not agreement:
+        return False
+    info = _label_grammar(label)
+    return bool(
+        info.get("person") == agreement.get("person") and
+        info.get("number") == agreement.get("number")
+    )
+
+
+def _select_pr_match(clean_key, prefer_pos=None, verb_agreement=None):
+    matches = _lookup_pr_matches(clean_key)
     if not matches:
         return None
-    # В словаре бывают дублеты: сначала cross-ref без русского gloss, затем
-    # полноценная статья с переводом (например, aulaūwuns). Для обратного
-    # перевода выбираем статью, из которой реально можно получить русский
-    # перевод; только после этого предпочитаем словарную форму инфлекции.
-    matches_sorted = sorted(matches, key=lambda m: (
-        not _entry_has_ru_gloss(m[0]),
-        m[1] != "",
-        bool(m[0].get("x")),
-    ))
-    return matches_sorted[0]
+
+    def score(match):
+        entry, label = match
+        override = _override_by_id.get(entry.get("i"))
+        pos = classify_pos(entry, override)
+        pos_miss = 0 if (prefer_pos is None or pos == prefer_pos) else 1
+        verb_miss = 0
+        if prefer_pos == "VERB" and verb_agreement:
+            verb_miss = 0 if _label_matches_agreement(label, verb_agreement) else 1
+        # В словаре бывают дублеты: сначала cross-ref без русского gloss, затем
+        # полноценная статья с переводом (например, aulaūwuns). Для обратного
+        # перевода выбираем статью, из которой реально можно получить русский
+        # перевод; потом учитываем контекстную часть речи.
+        return (
+            not _entry_has_ru_gloss(entry),
+            pos_miss,
+            verb_miss,
+            label == "" if prefer_pos == "VERB" else label != "",
+            bool(entry.get("x")),
+        )
+
+    return sorted(matches, key=score)[0]
+
+
+def _lookup_pr(clean_key):
+    return _select_pr_match(clean_key)
 
 
 def _clean_pr_token(token):
     return re.sub(r"[^\wāēīōūâêîôûàèìòùáéíóúŠšČčŽž-]", "", token, flags=re.UNICODE).lower()
+
+
+def _candidate_has_pos(clean_key, pos):
+    for entry, _ in _lookup_pr_matches(clean_key):
+        override = _override_by_id.get(entry.get("i"))
+        if classify_pos(entry, override) == pos:
+            return True
+    return False
+
+
+def _match_pos(match):
+    if not match:
+        return None
+    entry, _ = match
+    return classify_pos(entry, _override_by_id.get(entry.get("i")))
+
+
+def _next_pr_case(tokens, start_idx):
+    for j in range(start_idx + 1, len(tokens)):
+        tok = tokens[j]
+        if PR_PUNCT_TOKEN_RE.match(tok):
+            return None
+        if not PR_WORD_TOKEN_RE.match(tok):
+            continue
+        clean = _clean_pr_token(tok)
+        if clean.isdigit():
+            continue
+        found = _select_pr_match(clean)
+        if found:
+            info = _label_grammar(found[1])
+            if info.get("case"):
+                return info["case"]
+    return None
+
+
+def _ru_case_after_pr_preposition(prep_clean, next_pr_case):
+    mapping = PR_PREP_RU_CASE.get(prep_clean)
+    if not mapping:
+        return None
+    return mapping.get(next_pr_case) or mapping.get(None)
+
+
+def _russian_noun_agreement(entry, label, forced_case=None):
+    gloss, _ = _ru_gloss_for_entry(entry, label, forced_case=forced_case)
+    if not gloss or " " in gloss:
+        return None
+    p = morph.parse(gloss)[0]
+    info = _label_grammar(label)
+    return {
+        "gender": p.tag.gender or "masc",
+        "number": info.get("number") or p.tag.number or "sing",
+        "case": forced_case or info.get("ru_case") or p.tag.case or "nomn",
+    }
+
+
+def _next_pr_noun_agreement(tokens, start_idx, forced_case=None):
+    for j in range(start_idx + 1, len(tokens)):
+        tok = tokens[j]
+        if PR_PUNCT_TOKEN_RE.match(tok):
+            return None
+        if not PR_WORD_TOKEN_RE.match(tok):
+            continue
+        clean = _clean_pr_token(tok)
+        if clean.isdigit():
+            continue
+        found = _select_pr_match(clean, prefer_pos="NOUN") or _select_pr_match(clean, prefer_pos="NPRO")
+        if found and _match_pos(found) in ("NOUN", "NPRO"):
+            return _russian_noun_agreement(found[0], found[1], forced_case=forced_case)
+        found_any = _select_pr_match(clean)
+        if found_any and _match_pos(found_any) in ("VERB", "PREP", "CONJ", "PRCL", "INTJ", "ADVB"):
+            return None
+    return None
+
+
+def _subject_agreement_from_pr(entry, label, output_word=None):
+    info = _label_grammar(label)
+    word = (entry.get("w") or "").lower()
+    if word in {"as", "mes", "tū", "jūs"}:
+        if output_word in {"я", "мы", "ты", "вы"}:
+            return {
+                "я": {"person": "1per", "number": "sing", "gender": "masc"},
+                "мы": {"person": "1per", "number": "plur", "gender": None},
+                "ты": {"person": "2per", "number": "sing", "gender": "masc"},
+                "вы": {"person": "2per", "number": "plur", "gender": None},
+            }[output_word]
+    if info.get("ru_case") in (None, "nomn"):
+        number = info.get("number") or "sing"
+        return {"person": "3per", "number": number, "gender": info.get("gender") or "masc"}
+    return None
 
 
 def translate_pr_word(token):
@@ -894,6 +1212,8 @@ def _match_pr_phrase(tokens, start_idx):
 def translate_pr_sentence_json(sentence):
     tokens = re.findall(r"[\wāēīōūâêîôûàèìòùáéíóúŠšČčŽž-]+|[^\w\s]", sentence, flags=re.UNICODE)
     out_words, debug = [], []
+    pending_ru_case = None       # русский падеж после прусского предлога
+    subject_agreement = None     # подлежащее для выбора лица/числа глагола
     i = 0
     n = len(tokens)
     while i < n:
@@ -901,6 +1221,17 @@ def translate_pr_sentence_json(sentence):
         if PR_PUNCT_TOKEN_RE.match(tok):
             if not (out_words and str(out_words[-1]).endswith(tok)):
                 out_words.append(tok)
+            pending_ru_case = None
+            # Запятая часто отделяет приложение: подлежащее сохраняем, точка — нет.
+            if tok in ".!?":
+                subject_agreement = None
+            i += 1
+            continue
+
+        clean = _clean_pr_token(tok)
+        if clean.isdigit():
+            out_words.append(tok)
+            debug.append({"src": tok, "out": tok, "note": "число"})
             i += 1
             continue
 
@@ -911,9 +1242,68 @@ def translate_pr_sentence_json(sentence):
             i = phrase["end"]
             continue
 
-        ru, note = translate_pr_word(tok)
-        out_words.append(ru)
-        debug.append({"src": tok, "out": ru, "note": note})
+        prefer_pos = None
+        if subject_agreement and _candidate_has_pos(clean, "VERB"):
+            prefer_pos = "VERB"
+        elif _candidate_has_pos(clean, "ADJF") and _next_pr_noun_agreement(tokens, i, forced_case=pending_ru_case):
+            prefer_pos = "ADJF"
+
+        found = _select_pr_match(clean, prefer_pos=prefer_pos, verb_agreement=subject_agreement)
+        if not found:
+            # Собственные имена в словарь часто не внесены; лучше оставить их в
+            # тексте, чем превращать фразу в набор [слово?].
+            if tok[:1].isupper():
+                out_words.append(tok)
+                debug.append({"src": tok, "out": tok, "note": "вероятно имя; нет в словаре"})
+                if not pending_ru_case:
+                    subject_agreement = {"person": "3per", "number": "sing", "gender": "masc"}
+            else:
+                out_words.append(f"[{tok}?]")
+                debug.append({"src": tok, "out": f"[{tok}?]", "note": "нет в словаре"})
+            i += 1
+            continue
+
+        entry, label = found
+        pos = _match_pos(found)
+
+        if pos == "PREP":
+            next_case = _next_pr_case(tokens, i)
+            pending_ru_case = _ru_case_after_pr_preposition(clean, next_case)
+            gloss, note = _ru_gloss_for_entry(entry, label)
+            out_words.append(gloss)
+            debug.append({"src": tok, "out": gloss, "note": f"{entry.get('w')}: {note}; далее {pending_ru_case or 'словарный падеж'}"})
+            i += 1
+            continue
+
+        agreement = None
+        if pos in ("ADJF", "PRTF"):
+            agreement = _next_pr_noun_agreement(tokens, i, forced_case=pending_ru_case)
+
+        gloss, note = _ru_gloss_for_entry(
+            entry,
+            label,
+            forced_case=pending_ru_case,
+            agreement=agreement,
+            subject_gender=(subject_agreement or {}).get("gender"),
+        )
+        out_words.append(gloss)
+        debug.append({"src": tok, "out": gloss, "note": f"{entry.get('w')}: {note}"})
+
+        info = _label_grammar(label)
+        if pos in ("NOUN", "NPRO"):
+            if pending_ru_case:
+                pending_ru_case = None
+            elif info.get("ru_case") in (None, "nomn"):
+                subj = _subject_agreement_from_pr(entry, label, gloss)
+                if subj:
+                    subject_agreement = subj
+        elif pos == "VERB":
+            # После сказуемого подлежащее уже использовано, но его род может
+            # понадобиться только для этого глагола.
+            pass
+        elif pos in ("CONJ", "PRCL", "INTJ"):
+            pending_ru_case = None
+
         i += 1
 
     result = " ".join(out_words).replace(" ,", ",").replace(" .", ".").replace(" ?", "?").replace(" !", "!")

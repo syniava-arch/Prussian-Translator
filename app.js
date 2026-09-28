@@ -69,6 +69,74 @@ function showFatalError(msg) {
   errorText.textContent = msg;
 }
 
+async function fetchText(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  return response.text();
+}
+
+async function fetchOptionalText(url, fallback = "[]") {
+  try {
+    return await fetchText(url);
+  } catch (err) {
+    // Optional data files (for example phrasebook.json) should not block boot.
+    console.warn(`Optional file ${url} was not loaded`, err);
+    return fallback;
+  }
+}
+
+function joinJsonArrayShards(shardTexts) {
+  const parts = [];
+  for (const text of shardTexts) {
+    const trimmed = text.trim();
+    if (trimmed === "[]") continue;
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+      throw new Error("Shard is not a JSON array");
+    }
+    const body = trimmed.slice(1, -1).trim();
+    if (body) parts.push(body);
+  }
+  return `[${parts.join(",")}]`;
+}
+
+async function loadShardedSection(manifest, sectionName) {
+  const section = manifest[sectionName];
+  if (!section || !Array.isArray(section.shards) || !section.shards.length) {
+    throw new Error(`manifest: missing ${sectionName} shards`);
+  }
+  const shardTexts = await Promise.all(section.shards.map((shard) => {
+    if (!shard.path) throw new Error(`manifest: bad ${sectionName} shard path`);
+    return fetchText(`data/shards/${shard.path}`);
+  }));
+  return joinJsonArrayShards(shardTexts);
+}
+
+async function loadDictionaryData() {
+  try {
+    const manifestResponse = await fetch("data/shards/manifest.json", { cache: "no-cache" });
+    if (!manifestResponse.ok) throw new Error("manifest.json: HTTP " + manifestResponse.status);
+    const manifest = await manifestResponse.json();
+    if (manifest.schema !== 1) throw new Error("manifest.json: unsupported schema");
+
+    const dictCount = manifest.dictionary?.shards?.length || 0;
+    const overrideCount = manifest.overrides?.shards?.length || 0;
+    setStatus(`Загружаю индексированные части словаря (${dictCount + overrideCount} файлов)…`);
+    const [dictText, overridesText] = await Promise.all([
+      loadShardedSection(manifest, "dictionary"),
+      loadShardedSection(manifest, "overrides"),
+    ]);
+    return { dictText, overridesText, manifest, mode: "shards" };
+  } catch (err) {
+    console.warn("Sharded dictionary load failed; falling back to legacy JSON files", err);
+    setStatus("Индексы не найдены, загружаю большие JSON-файлы словаря…");
+    const [dictText, overridesText] = await Promise.all([
+      fetchText("data/dictionary.json"),
+      fetchText("data/overrides.json"),
+    ]);
+    return { dictText, overridesText, manifest: null, mode: "legacy" };
+  }
+}
+
 async function boot() {
   try {
     setStatus("Загружаю Pyodide (python в браузере)…");
@@ -80,27 +148,19 @@ async function boot() {
     await micropip.install(["pymorphy3", "pymorphy3-dicts-ru"]);
 
     setStatus("Загружаю данные словаря Prūsiska bilā…");
-    const [dictText, overridesText, coreCode] = await Promise.all([
-      fetch("data/dictionary.json").then(r => {
-        if (!r.ok) throw new Error("dictionary.json: HTTP " + r.status);
-        return r.text();
-      }),
-      fetch("data/overrides.json").then(r => {
-        if (!r.ok) throw new Error("overrides.json: HTTP " + r.status);
-        return r.text();
-      }),
-      fetch("translate_core.py").then(r => {
-        if (!r.ok) throw new Error("translate_core.py: HTTP " + r.status);
-        return r.text();
-      }),
+    const [dataFiles, phrasebookText, coreCode] = await Promise.all([
+      loadDictionaryData(),
+      fetchOptionalText("data/phrasebook.json", "[]"),
+      fetchText("translate_core.py"),
     ]);
 
     setStatus("Строю индексы (словоформы, предлоги, парадигмы)…");
     await pyodide.runPythonAsync(coreCode);
     const loadData = pyodide.globals.get("load_data");
-    const stats = loadData(dictText, overridesText).toJs({ dict_converter: Object.fromEntries });
+    const stats = loadData(dataFiles.dictText, dataFiles.overridesText, phrasebookText).toJs({ dict_converter: Object.fromEntries });
 
-    readyNote.textContent = `Слов: ${stats.words} · с парадигмами: ${stats.overrides} · предлогов: ${stats.prepositions}`;
+    const dataMode = dataFiles.mode === "shards" ? "индексы" : "большие JSON";
+    readyNote.textContent = `Слов: ${stats.words} · с парадигмами: ${stats.overrides} · предлогов: ${stats.prepositions} · фраз: ${stats.phrases || 0} · данные: ${dataMode}`;
 
     const translateSentenceJson = pyodide.globals.get("translate_sentence_json");
     const translatePrSentenceJson = pyodide.globals.get("translate_pr_sentence_json");
