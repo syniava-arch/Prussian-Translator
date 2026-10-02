@@ -148,16 +148,17 @@ async function boot() {
     await micropip.install(["pymorphy3", "pymorphy3-dicts-ru"]);
 
     setStatus("Загружаю данные словаря Prūsiska bilā…");
-    const [dataFiles, phrasebookText, coreCode] = await Promise.all([
+    const [dataFiles, phrasebookText, prioritiesText, coreCode] = await Promise.all([
       loadDictionaryData(),
       fetchOptionalText("data/phrasebook.json", "[]"),
+      fetchOptionalText("data/priorities.json", "{}"),
       fetchText("translate_core.py"),
     ]);
 
     setStatus("Строю индексы (словоформы, предлоги, парадигмы)…");
     await pyodide.runPythonAsync(coreCode);
     const loadData = pyodide.globals.get("load_data");
-    const stats = loadData(dataFiles.dictText, dataFiles.overridesText, phrasebookText).toJs({ dict_converter: Object.fromEntries });
+    const stats = loadData(dataFiles.dictText, dataFiles.overridesText, phrasebookText, prioritiesText).toJs({ dict_converter: Object.fromEntries });
 
     const dataMode = dataFiles.mode === "shards" ? "индексы" : "большие JSON";
     readyNote.textContent = `Слов: ${stats.words} · с парадигмами: ${stats.overrides} · предлогов: ${stats.prepositions} · фраз: ${stats.phrases || 0} · данные: ${dataMode}`;

@@ -60,6 +60,8 @@ _ru_index = {}
 _override_by_id = {}
 _preposition_index = {}
 _phrasebook = {}
+_pr_to_ru_priority = {}
+_ru_to_pr_priority = {}
 _ru_max_phrase_words = 1
 _pr_index = {}          # точная форма (в нижнем регистре) -> [(entry, label), ...]
 _pr_index_folded = {}   # то же, но без макронов - запасной вариант поиска
@@ -242,6 +244,47 @@ def _load_phrasebook(phrasebook_json_str):
     return phrases, max_words
 
 
+def _load_priorities(priorities_json_str):
+    """Ручные приоритеты значений.
+
+    Поддерживаем простой JSON:
+    {
+      "pr_to_ru": {"gints": "человек", "1957": "человек"},
+      "ru_to_pr": {"тевтонский": ["Teutōtisks"]}
+    }
+    Первое поле меняет русский gloss статьи, второе влияет на выбор
+    кандидата при RU -> PR.
+    """
+    if not priorities_json_str:
+        return {}, {}
+    try:
+        data = json.loads(priorities_json_str)
+    except Exception:
+        return {}, {}
+    if not isinstance(data, dict):
+        return {}, {}
+
+    pr_to_ru = {}
+    raw_pr_to_ru = data.get("pr_to_ru") or data.get("gloss") or {}
+    if isinstance(raw_pr_to_ru, dict):
+        for key, value in raw_pr_to_ru.items():
+            if value:
+                pr_to_ru[str(key).lower()] = str(value)
+
+    ru_to_pr = {}
+    raw_ru_to_pr = data.get("ru_to_pr") or {}
+    if isinstance(raw_ru_to_pr, dict):
+        for ru, preferred in raw_ru_to_pr.items():
+            key = _clean_ru_chunk(str(ru))
+            if not key:
+                continue
+            if isinstance(preferred, str):
+                preferred = [preferred]
+            if isinstance(preferred, list):
+                ru_to_pr[key] = [str(w).lower() for w in preferred if w]
+    return pr_to_ru, ru_to_pr
+
+
 def _collect_forms(node, label=""):
     """Рекурсивно собирает все прусские словоформы из paradigm/conjugation
     вместе с грамматической меткой (путь по ключам, плюс подпись лица для
@@ -266,14 +309,62 @@ def _collect_forms(node, label=""):
     return out
 
 
-def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None):
-    global _ru_index, _override_by_id, _preposition_index, _phrasebook, _ru_max_phrase_words
+def _synthesize_fresh_entries(dictionary, overrides):
+    """Повторяет логику 'fresh entry' из applyOverrides() в app.js: override
+    с полем 'word', для которого нет ни совпадения по id, ни по headword,
+    становится самостоятельной словарной статьёй (teutōtisks, plastātun и
+    т.п.), а не просто патчем существующей. Без этого такие слова были
+    видны на сайте, но непереводимы в обе стороны переводчиком."""
+    by_word = {}
+    for e in dictionary:
+        by_word.setdefault((e.get("w") or "").lower(), []).append(e)
+    by_id = {e.get("i"): e for e in dictionary}
+
+    fresh = []
+    for ov in overrides:
+        word = ov.get("word")
+        if not word:
+            continue
+        ov_id = ov.get("id")
+        if ov_id is not None and ov_id in by_id:
+            continue  # патч существующей записи по id
+        if by_word.get(word.lower()):
+            continue  # патч существующей записи по headword
+        key = word.lower()
+        entry = {
+            "i": "new-" + key,
+            "w": word,
+            "l": (ov.get("letter") or word[0]).upper(),
+            "f": ov.get("forms", ""),
+            "x": bool(ov.get("is_form")),
+            "b": ov.get("base_word", ""),
+            "g": ov.get("grammar_note", ""),
+            "s": ov.get("source") or "добавлено вручную",
+            "ru": ov.get("ru", ""),
+            "lt": ov.get("lt", ""),
+            "lv": ov.get("lv", ""),
+            "de": ov.get("de", ""),
+            "en": ov.get("en", ""),
+            "pl": ov.get("pl", ""),
+        }
+        fresh.append((entry, ov))
+    return fresh
+
+
+def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None, priorities_json_str=None):
+    global _ru_index, _override_by_id, _preposition_index, _phrasebook, _pr_to_ru_priority, _ru_to_pr_priority, _ru_max_phrase_words
     global _pr_index, _pr_index_folded, _pr_max_phrase_words
     dictionary = json.loads(dictionary_json_str)
     overrides = json.loads(overrides_json_str)
     _phrasebook, phrasebook_max_words = _load_phrasebook(phrasebook_json_str)
+    _pr_to_ru_priority, _ru_to_pr_priority = _load_priorities(priorities_json_str)
 
     _override_by_id = {o["id"]: o for o in overrides if "id" in o}
+
+    fresh_entries = _synthesize_fresh_entries(dictionary, overrides)
+    for entry, ov in fresh_entries:
+        dictionary.append(entry)
+        _override_by_id[entry["i"]] = ov
 
     ru_index = {}
     ru_max_phrase_words = 1
@@ -407,14 +498,15 @@ def pymorphy_pos_to_local(tag):
     return None
 
 
-def choose_candidate(candidates, wanted_pos):
+def choose_candidate(candidates, wanted_pos, ru_key=None):
     """Выбирает наиболее подходящую словарную статью.
 
     Раньше выбор был просто "первое совпадение нужной части речи", из-за чего
     часто выигрывали омонимы без парадигмы. Теперь при прочих равных
-    предпочитаем точную часть речи и наличие override — такую статью можно
-    склонять/спрягать.
+    предпочитаем точную часть речи, ручной приоритет и наличие override —
+    такую статью можно склонять/спрягать.
     """
+    preferred = _ru_to_pr_priority.get(_clean_ru_chunk(ru_key or ""), [])
     scored = []
     for order, e in enumerate(candidates):
         override = _override_by_id.get(e["i"])
@@ -423,8 +515,11 @@ def choose_candidate(candidates, wanted_pos):
         # pymorphy3 помечает притяжательные местоимения (мой/моя/моё) как ADJF,
         # а в словаре они могут быть pn. Считаем это совместимым.
         compatible_pronoun = wanted_pos == "ADJF" and pos == "NPRO"
+        w_lower = (e.get("w") or "").lower()
+        priority = preferred.index(w_lower) if w_lower in preferred else 10_000
         score = (
             0 if pos_match or compatible_pronoun else 1,
+            priority,
             0 if override else 1,
             order,
         )
@@ -490,6 +585,11 @@ def _select_preposition(clean, next_parse=None):
     if not key or key not in _preposition_index:
         return None
     choices = _preposition_index[key]
+    preferred = _ru_to_pr_priority.get(key, [])
+    for pref in preferred:
+        for choice in choices:
+            if (choice.get("word") or "").lower() == pref:
+                return choice
     if next_parse is not None:
         ru_case = PYMORPHY_CASE_TO_RU_MARKER.get(next_parse.tag.case)
         if ru_case:
@@ -562,7 +662,7 @@ def _agreement_from_following(tokens, start_idx, forced_case=None, max_words=5):
             candidates = _ru_index.get(lemma) or _ru_index.get(clean)
             override = None
             if candidates:
-                _, override = choose_candidate(candidates, pos)
+                _, override = choose_candidate(candidates, pos, lemma)
             gender_guess = GENDER_MAP.get(parse.tag.gender, "masc")
             gender = _preferred_gender_for_override(override, gender_guess)
             number = NUMBER_MAP.get(parse.tag.number, "sg")
@@ -646,7 +746,7 @@ def _translate_word_info(token, forced_case=None, agreement=None, preposition_ch
     if not candidates:
         return {"out": f"[{token}?]", "note": "нет в словаре", "gov_case": None, "pos": wanted_pos, "case_used": None, "consumes_case": wanted_pos in ("NOUN", "NPRO")}
 
-    entry, override = choose_candidate(candidates, wanted_pos)
+    entry, override = choose_candidate(candidates, wanted_pos, lemma)
     base_form = entry.get("w")
     entry_pos = classify_pos(entry, override)
 
@@ -737,7 +837,7 @@ def _match_ru_phrase(tokens, start_idx):
             }
         candidates = _ru_index.get(phrase)
         if candidates:
-            entry, _ = choose_candidate(candidates, None)
+            entry, _ = choose_candidate(candidates, None, phrase)
             return {
                 "end": positions[size - 1] + 1,
                 "src": " ".join(tokens[start_idx:positions[size - 1] + 1]),
@@ -962,9 +1062,13 @@ def _ru_gloss_for_entry(entry, label, forced_case=None, agreement=None, subject_
     возможности согласовав русское слово с распознанной грамматической
     формой. В отличие от ранней версии, не переносит прусский род на русские
     существительные: buttan neut, но русский "дом" masc."""
+    manual_gloss = (
+        _pr_to_ru_priority.get(str(entry.get("i")).lower()) or
+        _pr_to_ru_priority.get((entry.get("w") or "").lower())
+    )
     ru_field = entry.get("ru", "")
     first_chunk = _split_ru_field(ru_field)[0] if ru_field else ""
-    gloss = _clean_ru_chunk(first_chunk) or ru_field.strip() or "?"
+    gloss = manual_gloss or _clean_ru_chunk(first_chunk) or ru_field.strip() or "?"
 
     note_form = label.replace(".", "/") if label else "словарная форма"
     override = _override_by_id.get(entry.get("i"))
