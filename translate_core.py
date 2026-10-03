@@ -59,6 +59,7 @@ morph = pymorphy3.MorphAnalyzer()
 _ru_index = {}
 _override_by_id = {}
 _preposition_index = {}
+_pr_preposition_senses = {}
 _phrasebook = {}
 _pr_to_ru_priority = {}
 _ru_to_pr_priority = {}
@@ -352,7 +353,7 @@ def _synthesize_fresh_entries(dictionary, overrides):
 
 
 def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None, priorities_json_str=None):
-    global _ru_index, _override_by_id, _preposition_index, _phrasebook, _pr_to_ru_priority, _ru_to_pr_priority, _ru_max_phrase_words
+    global _ru_index, _override_by_id, _preposition_index, _pr_preposition_senses, _phrasebook, _pr_to_ru_priority, _ru_to_pr_priority, _ru_max_phrase_words
     global _pr_index, _pr_index_folded, _pr_max_phrase_words
     dictionary = json.loads(dictionary_json_str)
     overrides = json.loads(overrides_json_str)
@@ -389,6 +390,7 @@ def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None,
     _ru_max_phrase_words = max(ru_max_phrase_words, phrasebook_max_words)
 
     preposition_index = {}
+    pr_preposition_senses = {}
     for e in dictionary:
         s = e.get("s", "")
         if "prp" not in set(re.findall(r"[a-z]+", s.lower())):
@@ -397,6 +399,7 @@ def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None,
         gm = re.search(r"\b(acc|dat|gen)\b", s.lower())
         if gm:
             gov = RU_CASE_MARKER_TO_LOCAL[gm.group(1)]
+        pr_preposition_senses.setdefault((e.get("w") or "").lower(), []).append({"entry": e, "gov": gov})
         ru_field = e.get("ru", "")
         for raw_chunk in _split_ru_field(ru_field):
             chunk_clean = _clean_ru_chunk(raw_chunk)
@@ -411,6 +414,7 @@ def load_data(dictionary_json_str, overrides_json_str, phrasebook_json_str=None,
                     "entry": e,
                 })
     _preposition_index = preposition_index
+    _pr_preposition_senses = pr_preposition_senses
 
     pr_index = {}
     pr_max_phrase_words = 1
@@ -1168,6 +1172,46 @@ def _select_pr_match(clean_key, prefer_pos=None, verb_agreement=None):
     return sorted(matches, key=score)[0]
 
 
+def _select_pr_matches_tied(clean_key, prefer_pos=None, verb_agreement=None):
+    """Как _select_pr_match, но возвращает ВСЕ статьи с лучшим (минимальным)
+    счётом, а не только первую. Нужно, чтобы не терять настоящую
+    многозначность омографов вроде предлога pa (под / после / по
+    (согласно)) - раньше при равном счёте побеждала просто первая по
+    порядку в файле статья, и остальные значения пропадали бесследно."""
+    matches = _lookup_pr_matches(clean_key)
+    if not matches:
+        return []
+
+    def score(match):
+        entry, label = match
+        override = _override_by_id.get(entry.get("i"))
+        pos = classify_pos(entry, override)
+        pos_miss = 0 if (prefer_pos is None or pos == prefer_pos) else 1
+        verb_miss = 0
+        if prefer_pos == "VERB" and verb_agreement:
+            verb_miss = 0 if _label_matches_agreement(label, verb_agreement) else 1
+        return (
+            not _entry_has_ru_gloss(entry),
+            pos_miss,
+            verb_miss,
+            label == "" if prefer_pos == "VERB" else label != "",
+            bool(entry.get("x")),
+        )
+
+    scored = sorted(matches, key=score)
+    best = score(scored[0])
+    seen, tied = set(), []
+    for m in scored:
+        if score(m) != best:
+            break
+        entry, _ = m
+        if entry.get("i") in seen:
+            continue  # несколько форм одной и той же статьи - не дублируем
+        seen.add(entry.get("i"))
+        tied.append(m)
+    return tied
+
+
 def _lookup_pr(clean_key):
     return _select_pr_match(clean_key)
 
@@ -1214,6 +1258,74 @@ def _ru_case_after_pr_preposition(prep_clean, next_pr_case):
     if not mapping:
         return None
     return mapping.get(next_pr_case) or mapping.get(None)
+
+
+def _select_pr_preposition_sense(clean, next_case, fallback):
+    """У одного прусского предлога бывает несколько русских значений с
+    разным управлением (pa: dat -> 'под', acc -> 'по'/'после'). Падеж
+    следующего слова уже известен (next_case) - используем его, чтобы
+    выбрать подходящий смысл, а не всегда первый по порядку в словаре
+    (иначе 'по'/'после' с управлением acc всё равно получали бы перевод
+    'под', который на самом деле требует dat).
+
+    Если падеж известен, сужаем варианты до тех, что им управляют, и уже
+    среди НИХ (не среди всех смыслов) пробуем ручной приоритет из
+    priorities.json; на case-слепой fallback откатываемся только если
+    падеж следующего слова вообще не удалось определить."""
+    senses = _pr_preposition_senses.get(clean)
+    if not senses or len(senses) < 2:
+        return fallback
+
+    candidates = senses
+    if next_case:
+        matching = [s for s in senses if s["gov"] == next_case]
+        if matching:
+            candidates = matching
+            if len(matching) == 1:
+                return (matching[0]["entry"], "")
+
+    preferred_gloss = _pr_to_ru_priority.get(clean)
+    if preferred_gloss:
+        for s in candidates:
+            first_ru = _split_ru_field(s["entry"].get("ru", ""))[0] if s["entry"].get("ru") else ""
+            if _clean_ru_chunk(first_ru) == _clean_ru_chunk(preferred_gloss):
+                return (s["entry"], "")
+
+    if next_case:
+        return (candidates[0]["entry"], "")
+
+    return fallback
+
+
+def _preposition_standalone_gloss(clean, fallback_gloss, fallback_note):
+    """Падеж следующего слова неизвестен (предлог введён отдельно, без
+    существительного) - вместо произвольного выбора первой статьи по
+    порядку в словаре показываем все известные значения, например
+    'под / после / по (согласно)' для pa, а не только 'под'."""
+    senses = _pr_preposition_senses.get(clean)
+    if not senses or len(senses) < 2:
+        return fallback_gloss, fallback_note
+
+    preferred_gloss = _pr_to_ru_priority.get(clean)
+    if preferred_gloss:
+        return fallback_gloss, fallback_note  # ручной приоритет уже выбрал смысл
+
+    glosses = []
+    for s in senses:
+        first_ru = _split_ru_field(s["entry"].get("ru", ""))[0] if s["entry"].get("ru") else ""
+        g = _clean_ru_chunk(first_ru)
+        if g and g not in glosses:
+            glosses.append(g)
+    if len(glosses) <= 1:
+        return fallback_gloss, fallback_note
+
+    gov_by_gloss = {}
+    for s in senses:
+        first_ru = _split_ru_field(s["entry"].get("ru", ""))[0] if s["entry"].get("ru") else ""
+        g = _clean_ru_chunk(first_ru)
+        gov_by_gloss.setdefault(g, s["gov"])
+    combined = " / ".join(f"{g} (+{gov_by_gloss[g]})" for g in glosses)
+    return combined, f"омограф-предлог, {len(glosses)} значения в зависимости от падежа"
 
 
 def _russian_noun_agreement(entry, label, forced_case=None):
@@ -1270,13 +1382,30 @@ def translate_pr_word(token):
     if not clean:
         return token, None
 
-    found = _lookup_pr(clean)
-    if not found:
+    tied = _select_pr_matches_tied(clean)
+    if not tied:
         return f"[{token}?]", "нет в словаре"
 
-    entry, label = found
-    gloss, note = _ru_gloss_for_entry(entry, label)
-    return gloss, f"{entry.get('w')}: {note}"
+    if len(tied) == 1:
+        entry, label = tied[0]
+        gloss, note = _ru_gloss_for_entry(entry, label)
+        return gloss, f"{entry.get('w')}: {note}"
+
+    # несколько равноправных статей с одной и той же прусской формой
+    # (настоящие омографы, например предлог pa) - показываем все известные
+    # значения вместо того, чтобы произвольно выбрать одно по порядку в файле
+    glosses = []
+    for entry, label in tied:
+        gloss, _ = _ru_gloss_for_entry(entry, label)
+        if gloss and gloss not in glosses:
+            glosses.append(gloss)
+    if len(glosses) <= 1:
+        entry, label = tied[0]
+        gloss, note = _ru_gloss_for_entry(entry, label)
+        return gloss, f"{entry.get('w')}: {note}"
+
+    combined = " / ".join(glosses)
+    return combined, f"{tied[0][0].get('w')}: омограф, {len(glosses)} значения"
 
 
 def _match_pr_phrase(tokens, start_idx):
@@ -1372,8 +1501,14 @@ def translate_pr_sentence_json(sentence):
 
         if pos == "PREP":
             next_case = _next_pr_case(tokens, i)
+            entry, label = _select_pr_preposition_sense(clean, next_case, (entry, label))
             pending_ru_case = _ru_case_after_pr_preposition(clean, next_case)
             gloss, note = _ru_gloss_for_entry(entry, label)
+            if not next_case:
+                # нет следующего слова (или его падеж не определить) - значит,
+                # контекстно сузить смысл нечем; показываем все известные
+                # значения, а не только то, что выиграло бы по умолчанию
+                gloss, note = _preposition_standalone_gloss(clean, gloss, note)
             out_words.append(gloss)
             debug.append({"src": tok, "out": gloss, "note": f"{entry.get('w')}: {note}; далее {pending_ru_case or 'словарный падеж'}"})
             i += 1
